@@ -1,0 +1,292 @@
+version: '2.1'
+services:
+
+######################################################
+# DATABASE SERVICE
+######################################################
+  postgres:
+    build: './docker/postgres'
+    restart: always
+    container_name: postgres
+    logging:
+      driver: "json-file"
+      options:
+          max-file: "5"
+          max-size: "10m"
+    ports:
+      - 32769:5432
+    #volumes:
+      #- ./mnt/postgres:/var/lib/postgresql/data/pgdata
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow_db
+      #- PGDATA=/var/lib/postgresql/data/pgdata
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-q", "-d", "airflow_db", "-U", "airflow" ]
+      timeout: 45s
+      interval: 10s
+      retries: 10
+    networks:
+      - bigdata-network
+
+######################################################
+# HADOOP SERVICES
+######################################################
+  namenode:
+    build: ./docker/hadoop/hadoop-namenode
+    restart: always
+    container_name: namenode
+    logging:
+      driver: "json-file"
+      options:
+          max-file: "5"
+          max-size: "10m"
+    ports:
+      - 32763:9870
+    environment:
+      - CLUSTER_NAME=hadoop_cluster
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "namenode", "9870" ]
+      timeout: 45s
+      interval: 10s
+      retries: 10
+    networks:
+      - bigdata-network
+
+  datanode:
+    build: ./docker/hadoop/hadoop-datanode
+    restart: always
+    container_name: datanode
+    logging:
+      driver: "json-file"
+      options:
+          max-file: "5"
+          max-size: "10m"
+    depends_on:
+      - namenode
+    environment:
+      - SERVICE_PRECONDITION=namenode:9870
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "datanode", "9864" ]
+      timeout: 45s
+      interval: 10s
+      retries: 10
+    networks:
+      - bigdata-network
+
+  hive-metastore:
+    build: ./docker/hive/hive-metastore
+    restart: always
+    container_name: hive-metastore
+    logging:
+      driver: "json-file"
+      options:
+          max-file: "5"
+          max-size: "10m"
+    depends_on:
+      - namenode
+      - datanode
+      - postgres
+    environment:
+      - SERVICE_PRECONDITION=namenode:9870 datanode:9864 postgres:5432
+    ports:
+      - 32761:9083
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "hive-metastore", "9083" ]
+      timeout: 45s
+      interval: 10s
+      retries: 10
+    networks:
+      - bigdata-network
+
+  hive-server:
+    build: ./docker/hive/hive-server
+    restart: always
+    container_name: hive-server
+    logging:
+      driver: "json-file"
+      options:
+          max-file: "5"
+          max-size: "10m"
+    depends_on:
+      - hive-metastore
+    environment:
+      - SERVICE_PRECONDITION=hive-metastore:9083
+    ports:
+      - 32760:10000
+      - 32759:10002
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "hive-server", "10002" ]
+      timeout: 45s
+      interval: 10s
+      retries: 10
+    networks:
+      - bigdata-network
+
+  hive-webhcat:
+    build: ./docker/hive/hive-webhcat
+    restart: always
+    container_name: hive-webhcat
+    logging:
+      driver: "json-file"
+      options:
+          max-file: "5"
+          max-size: "10m"
+    depends_on:
+      - hive-server
+    environment:
+      - SERVICE_PRECONDITION=hive-server:10000
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "hive-webhcat", "50111" ]
+      timeout: 45s
+      interval: 10s
+      retries: 10
+    networks:
+      - bigdata-network
+
+  hue:
+    build: ./docker/hue
+    restart: always
+    container_name: hue
+    logging:
+      driver: "json-file"
+      options:
+          max-file: "5"
+          max-size: "10m"
+    depends_on:
+      - hive-server
+      - postgres
+    ports:
+      - 32762:8888
+    volumes:
+      - ./mnt/hue/hue.ini:/usr/share/hue/desktop/conf/z-hue.ini
+    environment:
+      - SERVICE_PRECONDITION=hive-server:10000 postgres:5432
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "hue", "8888" ]
+      timeout: 45s
+      interval: 10s
+      retries: 10
+    networks:
+      - bigdata-network
+
+######################################################
+# SPARK SERVICES
+######################################################
+  spark-master:
+    build: ./docker/spark/spark-master
+    restart: always
+    container_name: spark-master
+    hostname: spark-master
+    logging:
+      driver: "json-file"
+      options:
+          max-file: "5"
+          max-size: "10m"
+    ports:
+      - 8082:8082
+      - 7077:7077
+    volumes:
+      - ./mnt/spark/apps:/opt/spark-apps
+      - ./mnt/spark/data:/opt/spark-data
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "spark-master", "8082" ]
+      timeout: 45s
+      interval: 10s
+      retries: 10
+    networks:
+      - bigdata-network
+
+  spark-worker:
+    build: ./docker/spark/spark-worker
+    container_name: spark-worker
+    logging:
+      driver: "json-file"
+      options:
+          max-file: "5"
+          max-size: "10m"
+    depends_on:
+      - spark-master
+    ports:
+      - 32764:8081
+    volumes:
+      - ./mnt/spark/apps:/opt/spark-apps
+      - ./mnt/spark/data:/opt/spark-data
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "spark-worker", "8081" ]
+      timeout: 45s
+      interval: 10s
+      retries: 10
+    networks:
+      - bigdata-network
+
+
+######################################################
+# AIRFLOW
+######################################################
+
+  airflow:
+    build: ./docker/airflow
+    restart: always
+    container_name: airflow
+    volumes:
+      - ./mnt/airflow/dags:/opt/airflow/dags
+      - ./mnt/airflow/spark:/opt/airflow/spark
+      - ./mnt/airflow/plugins:/opt/airflow/plugins
+      - ./mnt/airflow/kafka:/opt/airflow/kafka
+    ports:
+      - 8080:8080
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "airflow", "8080" ]
+      timeout: 45s
+      interval: 10s
+      retries: 10
+    networks:
+      - bigdata-network
+
+######################################################
+# KAFKA
+######################################################
+
+  kafka:
+    image: docker.io/bitnami/kafka:3.6
+    restart: always
+    container_name: kafka
+    hostname: kafka
+    ports:
+      - 9092:9092
+      - 9093:9093
+    environment:
+      - KAFKA_CFG_NODE_ID=0
+      - KAFKA_CFG_PROCESS_ROLES=controller,broker
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@kafka:9093
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+    networks:
+      - bigdata-network
+
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - 8089:8080
+    environment:
+      KAFKA_CLUSTERS_0_NAME: kafka
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: 'true'
+    networks:
+      - bigdata-network
+    restart: on-failure
+
+
+######################################################
+# NETWORK
+######################################################
+networks:
+  bigdata-network:
+    external: true
